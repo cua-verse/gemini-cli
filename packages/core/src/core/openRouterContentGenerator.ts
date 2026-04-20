@@ -434,20 +434,38 @@ function convertTools(
   const toolsArray = Array.isArray(tools) ? tools : [tools];
   if (toolsArray.length === 0) return undefined;
 
-  const firstTool = toolsArray[0];
-  if (!firstTool || typeof firstTool === 'string') return undefined;
+  // Collect function declarations from ALL tool objects, not just the first.
+  // gemini-cli registers built-in and MCP tools as separate Tool entries.
+  const allDecls: GenaiTool['functionDeclarations'] = [];
+  for (const t of toolsArray) {
+    if (!t || typeof t === 'string') continue;
+    const decls = (t as GenaiTool).functionDeclarations;
+    if (decls) allDecls.push(...decls);
+  }
+  if (!allDecls || allDecls.length === 0) return undefined;
 
-  const functionDeclarations = (firstTool as GenaiTool).functionDeclarations;
-  if (!functionDeclarations) return undefined;
-
-  return functionDeclarations.map((func) => ({
-    type: 'function' as const,
-    function: {
-      name: func.name || '',
-      description: func.description,
-      parameters: (func.parameters || {}) as Record<string, unknown>,
-    },
-  }));
+  return allDecls.map((func) => {
+    // FunctionDeclaration has two mutually-exclusive schema fields:
+    //   parameters:          Schema (Gemini internal type with UPPER-CASE types)
+    //   parametersJsonSchema: raw JSON Schema object
+    // gemini-cli core tools use parametersJsonSchema — drop it directly into
+    // the OpenAI tool definition. Falling back to `parameters` preserves
+    // compatibility with tools that set only the Gemini-Schema variant.
+    const jsonSchema = (func as { parametersJsonSchema?: unknown })
+      .parametersJsonSchema;
+    const parameters =
+      jsonSchema !== undefined
+        ? (jsonSchema as Record<string, unknown>)
+        : ((func.parameters || {}) as Record<string, unknown>);
+    return {
+      type: 'function' as const,
+      function: {
+        name: func.name || '',
+        description: func.description,
+        parameters,
+      },
+    };
+  });
 }
 
 function convertToGeminiResponse(
