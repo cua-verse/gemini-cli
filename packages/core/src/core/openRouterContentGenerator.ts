@@ -149,9 +149,23 @@ export function createOpenRouterContentGenerator(
           if (call.argsText) {
             try {
               parsed = JSON.parse(call.argsText);
-            } catch {
+            } catch (e) {
+              // Debug: surface the malformed payload so we can diagnose
+              // whether OpenRouter sent fragmented/invalid JSON.
+              if (process.env['OPENROUTER_DEBUG']) {
+                process.stderr.write(
+                  `[openrouter] tool_call ${call.name} arg parse failed: ` +
+                    `${String(e)}; raw=${JSON.stringify(call.argsText)}\n`,
+                );
+              }
               parsed = {};
             }
+          }
+          if (process.env['OPENROUTER_DEBUG']) {
+            process.stderr.write(
+              `[openrouter] tool_call ${call.name} args=` +
+                `${JSON.stringify(parsed)}\n`,
+            );
           }
           toolParts.push({
             functionCall: {
