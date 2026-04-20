@@ -75,6 +75,11 @@ export function AuthDialog({
       value: AuthType.USE_VERTEX_AI,
       key: AuthType.USE_VERTEX_AI,
     },
+    {
+      label: 'OpenRouter',
+      value: AuthType.USE_OPENROUTER,
+      key: AuthType.USE_OPENROUTER,
+    },
   ];
 
   if (settings.merged.security.auth.enforcedType) {

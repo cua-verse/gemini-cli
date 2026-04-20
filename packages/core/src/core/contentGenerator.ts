@@ -63,6 +63,31 @@ export enum AuthType {
   LEGACY_CLOUD_SHELL = 'cloud-shell',
   COMPUTE_ADC = 'compute-default-credentials',
   GATEWAY = 'gateway',
+  USE_OPENROUTER = 'openrouter',
+}
+
+/**
+ * Maps Gemini model names to OpenRouter model IDs. When a model is not in
+ * the explicit map, falls back to prefixing `google/` (matches OpenRouter's
+ * convention for Gemini models).
+ */
+function mapGeminiModelToOpenRouter(model: string): string {
+  const modelMap: Record<string, string> = {
+    'gemini-2.5-pro': 'google/gemini-2.5-pro',
+    'gemini-2.5-flash': 'google/gemini-2.5-flash',
+    'gemini-2.5-pro-preview': 'google/gemini-2.5-pro-preview',
+    'gemini-2.5-flash-preview': 'google/gemini-2.5-flash-preview',
+    'gemini-2.0-flash-thinking-exp': 'google/gemini-2.0-flash-thinking-exp',
+    'gemini-2.0-flash-exp': 'google/gemini-2.0-flash-exp',
+    'gemini-pro': 'google/gemini-pro',
+    'gemini-pro-vision': 'google/gemini-pro-vision',
+    'gemini-flash-1.5': 'google/gemini-flash-1.5',
+    'gemini-1.5-pro': 'google/gemini-pro-1.5',
+    'gemini-1.5-flash': 'google/gemini-flash-1.5',
+  };
+
+  if (model.startsWith('google/')) return model;
+  return modelMap[model] || `google/${model}`;
 }
 
 /**
@@ -79,6 +104,9 @@ export function getAuthTypeFromEnv(): AuthType | undefined {
   }
   if (process.env['GOOGLE_GENAI_USE_VERTEXAI'] === 'true') {
     return AuthType.USE_VERTEX_AI;
+  }
+  if (process.env['OPENROUTER_API_KEY']) {
+    return AuthType.USE_OPENROUTER;
   }
   if (process.env['GEMINI_API_KEY']) {
     return AuthType.USE_GEMINI;
@@ -119,6 +147,8 @@ export async function createContentGeneratorConfig(
     process.env['GOOGLE_CLOUD_PROJECT_ID'] ||
     undefined;
   const googleCloudLocation = process.env['GOOGLE_CLOUD_LOCATION'] || undefined;
+  const openRouterApiKey = process.env['OPENROUTER_API_KEY'] || undefined;
+  const openRouterBaseUrl = process.env['OPENROUTER_BASE_URL'] || undefined;
 
   const contentGeneratorConfig: ContentGeneratorConfig = {
     authType,
@@ -154,6 +184,15 @@ export async function createContentGeneratorConfig(
 
   if (authType === AuthType.GATEWAY) {
     contentGeneratorConfig.apiKey = apiKey || 'gateway-placeholder-key';
+    contentGeneratorConfig.vertexai = false;
+
+    return contentGeneratorConfig;
+  }
+
+  if (authType === AuthType.USE_OPENROUTER && openRouterApiKey) {
+    contentGeneratorConfig.apiKey = openRouterApiKey;
+    contentGeneratorConfig.baseUrl =
+      openRouterBaseUrl || baseUrl || 'https://openrouter.ai/api/v1';
     contentGeneratorConfig.vertexai = false;
 
     return contentGeneratorConfig;
@@ -252,6 +291,23 @@ export async function createContentGenerator(
           gcConfig,
           sessionId,
         ),
+        gcConfig,
+      );
+    }
+
+    if (config.authType === AuthType.USE_OPENROUTER) {
+      const { createOpenRouterContentGenerator } = await import(
+        './openRouterContentGenerator.js'
+      );
+      const httpOptions = { headers: baseHeaders };
+      // Attach the resolved, OpenRouter-formatted model to the config so the
+      // generator can use it when the per-request model is not set.
+      const openRouterConfig: ContentGeneratorConfig & { model?: string } = {
+        ...config,
+        model: mapGeminiModelToOpenRouter(model),
+      };
+      return new LoggingContentGenerator(
+        createOpenRouterContentGenerator(openRouterConfig, httpOptions),
         gcConfig,
       );
     }
