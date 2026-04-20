@@ -82,8 +82,132 @@ export function createOpenRouterContentGenerator(
         stream_options: { include_usage: true },
       });
 
+      // OpenAI streams tool calls as fragments:
+      //   chunk 1: {index: 0, function: {name: "list_directory", arguments: ""}}
+      //   chunk 2: {index: 0, function: {arguments: "{\"dir_path"}}
+      //   chunk 3: {index: 0, function: {arguments: "\":\"/tmp\"}"}}
+      // The Gemini @google/genai interface expects each yielded functionCall
+      // to be COMPLETE (name + parsed JSON args). Emitting per-chunk produces
+      // a "name=undefined, args={}" call followed by orphan arg fragments,
+      // which gemini-cli's tool loop treats as `undefined_tool_name`.
+      //
+      // Fix: accumulate tool_call fragments across chunks keyed by index;
+      // emit a completed functionCall only when finish_reason or stream-end
+      // signals that the tool call is done.
+      type PendingCall = { name: string; argsText: string; id?: string };
+      const pending = new Map<number, PendingCall>();
+      let finalUsage: OpenAI.Completions.CompletionUsage | undefined;
+      let finalFinishReason: string | null | undefined;
+
       for await (const chunk of stream) {
-        yield convertChunkToGeminiResponse(chunk);
+        const choice = chunk.choices?.[0];
+        const delta = choice?.delta;
+
+        // Text deltas — yield immediately so the caller can stream them.
+        if (delta?.content) {
+          const parts: Part[] = [{ text: delta.content }];
+          const resp = new GenerateContentResponse();
+          resp.candidates = [
+            {
+              content: { role: 'model', parts },
+              finishReason: FinishReason.STOP,
+              avgLogprobs: 0,
+            },
+          ];
+          const fb = new GenerateContentResponsePromptFeedback();
+          fb.blockReason = BlockedReason.BLOCKED_REASON_UNSPECIFIED;
+          fb.safetyRatings = [];
+          resp.promptFeedback = fb;
+          yield resp;
+        }
+
+        // Tool call deltas — accumulate, do not yield yet.
+        if (delta?.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            const idx = typeof tc.index === 'number' ? tc.index : 0;
+            const cur = pending.get(idx) || { name: '', argsText: '' };
+            if (tc.id) cur.id = tc.id;
+            if (tc.function?.name) cur.name = tc.function.name;
+            if (tc.function?.arguments) {
+              cur.argsText += tc.function.arguments;
+            }
+            pending.set(idx, cur);
+          }
+        }
+
+        if (choice?.finish_reason) finalFinishReason = choice.finish_reason;
+        if (chunk.usage) finalUsage = chunk.usage;
+      }
+
+      // Stream ended. If we accumulated tool calls, emit them now as one
+      // response containing all complete functionCalls.
+      if (pending.size > 0) {
+        const toolParts: Part[] = [];
+        for (const call of pending.values()) {
+          if (!call.name) continue; // skip malformed
+          let parsed: Record<string, unknown> = {};
+          if (call.argsText) {
+            try {
+              parsed = JSON.parse(call.argsText);
+            } catch {
+              parsed = {};
+            }
+          }
+          toolParts.push({
+            functionCall: {
+              id: call.id,
+              name: call.name,
+              args: parsed,
+            },
+          });
+        }
+
+        if (toolParts.length > 0) {
+          const resp = new GenerateContentResponse();
+          resp.candidates = [
+            {
+              content: { role: 'model', parts: toolParts },
+              finishReason: finalFinishReason
+                ? mapFinishReason(finalFinishReason)
+                : FinishReason.STOP,
+              avgLogprobs: 0,
+            },
+          ];
+          const fb = new GenerateContentResponsePromptFeedback();
+          fb.blockReason = BlockedReason.BLOCKED_REASON_UNSPECIFIED;
+          fb.safetyRatings = [];
+          resp.promptFeedback = fb;
+          if (finalUsage) {
+            const um = new GenerateContentResponseUsageMetadata();
+            const u = finalUsage as OpenRouterUsage;
+            um.promptTokenCount = u.prompt_tokens || 0;
+            um.candidatesTokenCount = u.completion_tokens || 0;
+            um.totalTokenCount = u.total_tokens || 0;
+            um.cachedContentTokenCount = 0;
+            resp.usageMetadata = um;
+          }
+          yield resp;
+          return;
+        }
+      }
+
+      // No tool calls: emit a final empty-parts response carrying usage so
+      // caller can close the stream with token counts.
+      if (finalUsage) {
+        const resp = new GenerateContentResponse();
+        resp.candidates = [];
+        const fb = new GenerateContentResponsePromptFeedback();
+        fb.blockReason = BlockedReason.BLOCKED_REASON_UNSPECIFIED;
+        fb.safetyRatings = [];
+        resp.promptFeedback = fb;
+        const um = new GenerateContentResponseUsageMetadata();
+        const u = finalUsage as OpenRouterUsage;
+        um.promptTokenCount = u.prompt_tokens || 0;
+        um.candidatesTokenCount = u.completion_tokens || 0;
+        um.totalTokenCount = u.total_tokens || 0;
+        um.cachedContentTokenCount = 0;
+        resp.usageMetadata = um;
+        yield resp;
       }
     } catch (error) {
       throw convertError(error);
@@ -221,7 +345,7 @@ function convertToOpenAIFormat(
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const contents = normalizeContents(request.contents);
 
-  return contents
+  const result = contents
     .map((content: Content) => {
       const role =
         content.role === 'model' ? 'assistant' : (content.role as string);
@@ -280,11 +404,12 @@ function convertToOpenAIFormat(
         .join('\n');
 
       return {
-        role: (role === 'user' ? 'user' : 'assistant'),
+        role: role === 'user' ? 'user' : 'assistant',
         content: text,
       };
     })
     .flat();
+  return result as OpenAI.Chat.ChatCompletionMessageParam[];
 }
 
 function convertTools(
@@ -363,70 +488,6 @@ function convertToGeminiResponse(
   response.candidates = candidates;
   response.promptFeedback = promptFeedback;
   response.usageMetadata = usageMetadata;
-
-  return response;
-}
-
-function convertChunkToGeminiResponse(
-  chunk: OpenAI.Chat.ChatCompletionChunk,
-): GenerateContentResponse {
-  const choice = chunk.choices?.[0];
-  const delta = choice?.delta;
-
-  const parts: Part[] = [];
-
-  if (delta?.content) {
-    parts.push({ text: delta.content });
-  }
-
-  if (delta?.tool_calls) {
-    for (const toolCall of delta.tool_calls) {
-      if (toolCall.function) {
-        parts.push({
-          functionCall: {
-            name: toolCall.function.name,
-            args: toolCall.function.arguments
-              ? JSON.parse(toolCall.function.arguments)
-              : {},
-          },
-        });
-      }
-    }
-  }
-
-  const candidates: Candidate[] =
-    parts.length > 0
-      ? [
-          {
-            content: {
-              role: 'model',
-              parts,
-            },
-            finishReason: choice?.finish_reason
-              ? mapFinishReason(choice.finish_reason)
-              : FinishReason.STOP,
-            avgLogprobs: 0,
-          },
-        ]
-      : [];
-
-  const response = new GenerateContentResponse();
-  response.candidates = candidates;
-
-  const promptFeedback = new GenerateContentResponsePromptFeedback();
-  promptFeedback.blockReason = BlockedReason.BLOCKED_REASON_UNSPECIFIED;
-  promptFeedback.safetyRatings = [];
-  response.promptFeedback = promptFeedback;
-
-  const usage = chunk.usage as OpenRouterUsage | undefined;
-  if (usage) {
-    const usageMetadata = new GenerateContentResponseUsageMetadata();
-    usageMetadata.promptTokenCount = usage.prompt_tokens || 0;
-    usageMetadata.candidatesTokenCount = usage.completion_tokens || 0;
-    usageMetadata.totalTokenCount = usage.total_tokens || 0;
-    usageMetadata.cachedContentTokenCount = 0;
-    response.usageMetadata = usageMetadata;
-  }
 
   return response;
 }
