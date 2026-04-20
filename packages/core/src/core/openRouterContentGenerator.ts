@@ -407,7 +407,13 @@ function convertToOpenAIFormat(
       if (functionResponses.length > 0 && role === 'function') {
         return functionResponses.map((part: Part, index: number) => ({
           role: 'tool' as const,
-          tool_call_id: part.functionResponse?.name || `call_${index}`,
+          // Prefer functionResponse.id to match the original tool_call.id
+          // emitted on the assistant turn (OpenAI requires strict matching).
+          // Fall back to name only when id is missing (older gemini-cli paths).
+          tool_call_id:
+            part.functionResponse?.id ||
+            part.functionResponse?.name ||
+            `call_${index}`,
           content: JSON.stringify(part.functionResponse?.response || {}),
         }));
       }
