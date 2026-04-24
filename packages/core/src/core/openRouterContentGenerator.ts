@@ -48,6 +48,32 @@ interface OpenRouterUsage {
   total_tokens?: number;
 }
 
+const DEFAULT_OPENROUTER_COMPRESSION_MODEL = 'google/gemini-3-flash-preview';
+
+/**
+ * Resolve Gemini CLI model IDs to OpenRouter model IDs.
+ *
+ * Chat compression is a utility request. Gemini CLI's built-in compression
+ * aliases currently resolve to Google-side IDs such as `gemini-3-pro-preview`,
+ * which OpenRouter may not expose. Keep normal chat model selection intact, but
+ * use an OpenRouter-supported flash model for compression by default.
+ */
+export function resolveOpenRouterModel(
+  model: string | undefined,
+  role?: unknown,
+): string {
+  if (role === 'utility_compressor') {
+    return (
+      process.env['OPENROUTER_COMPRESSION_MODEL'] ||
+      DEFAULT_OPENROUTER_COMPRESSION_MODEL
+    );
+  }
+
+  if (!model) return '';
+  if (model.startsWith('google/')) return model;
+  return `google/${model}`;
+}
+
 export function createOpenRouterContentGenerator(
   config: ContentGeneratorConfig,
   httpOptions: { headers: Record<string, string> },
@@ -64,13 +90,17 @@ export function createOpenRouterContentGenerator(
 
   async function* doGenerateContentStream(
     request: GenerateContentParameters,
+    role?: unknown,
   ): AsyncGenerator<GenerateContentResponse> {
     try {
       const messages = convertToOpenAIFormat(request);
       const systemInstruction = extractSystemInstruction(request);
 
       const stream = await openRouterClient.chat.completions.create({
-        model: request.model || (config as { model?: string }).model || '',
+        model: resolveOpenRouterModel(
+          request.model || (config as { model?: string }).model,
+          role,
+        ),
         messages: systemInstruction
           ? [{ role: 'system', content: systemInstruction }, ...messages]
           : messages,
@@ -232,14 +262,17 @@ export function createOpenRouterContentGenerator(
     async generateContent(
       request: GenerateContentParameters,
       _userPromptId: string,
-      _role: unknown,
+      role: unknown,
     ): Promise<GenerateContentResponse> {
       try {
         const messages = convertToOpenAIFormat(request);
         const systemInstruction = extractSystemInstruction(request);
 
         const completion = await openRouterClient.chat.completions.create({
-          model: request.model || (config as { model?: string }).model || '',
+          model: resolveOpenRouterModel(
+            request.model || (config as { model?: string }).model,
+            role,
+          ),
           messages: systemInstruction
             ? [{ role: 'system', content: systemInstruction }, ...messages]
             : messages,
@@ -266,9 +299,9 @@ export function createOpenRouterContentGenerator(
     async generateContentStream(
       request: GenerateContentParameters,
       _userPromptId: string,
-      _role: unknown,
+      role: unknown,
     ): Promise<AsyncGenerator<GenerateContentResponse>> {
-      return doGenerateContentStream(request);
+      return doGenerateContentStream(request, role);
     },
 
     async countTokens(
