@@ -24,10 +24,10 @@ import {
   type AnyToolInvocation,
   type PolicyUpdateOptions,
 } from '../tools/tools.js';
+import { ASK_USER_TOOL_NAME , EDIT_TOOL_NAMES } from '../tools/tool-names.js';
 import { buildFilePathArgsPattern } from '../policy/utils.js';
 import { makeRelative } from '../utils/paths.js';
 import { DiscoveredMCPTool, formatMcpToolName } from '../tools/mcp-tool.js';
-import { EDIT_TOOL_NAMES } from '../tools/tool-names.js';
 import type { ValidatingToolCall } from './types.js';
 import type { AgentLoopContext } from '../config/agent-loop-context.js';
 
@@ -92,6 +92,16 @@ export async function checkPolicy(
    * This is necessary to access metadata like custom deny messages.
    */
   if (decision === PolicyDecision.ASK_USER) {
+    if (
+      !config.isInteractive() &&
+      config.getApprovalMode() === ApprovalMode.YOLO &&
+      toolCall.request.name !== ASK_USER_TOOL_NAME
+    ) {
+      return {
+        decision: PolicyDecision.ALLOW,
+        rule: result.rule,
+      };
+    }
     if (!config.isInteractive()) {
       throw new Error(
         `Tool execution for "${

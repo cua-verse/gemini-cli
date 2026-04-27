@@ -153,6 +153,50 @@ describe('policy.ts', () => {
       );
     });
 
+    it('should allow ASK_USER tool decisions in non-interactive YOLO mode', async () => {
+      const mockPolicyEngine = {
+        check: vi.fn().mockResolvedValue({ decision: PolicyDecision.ASK_USER }),
+      } as unknown as Mocked<PolicyEngine>;
+
+      const mockConfig = {
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.YOLO),
+        getPolicyEngine: vi.fn().mockReturnValue(mockPolicyEngine),
+        isInteractive: vi.fn().mockReturnValue(false),
+      } as unknown as Mocked<Config>;
+
+      (mockConfig as unknown as { config: Config }).config =
+        mockConfig as Config;
+
+      const toolCall = {
+        request: { name: 'run_shell_command', args: { command: 'echo ok' } },
+        tool: { name: 'run_shell_command', displayName: 'Shell' },
+      } as ValidatingToolCall;
+
+      const result = await checkPolicy(toolCall, mockConfig);
+      expect(result.decision).toBe(PolicyDecision.ALLOW);
+    });
+
+    it('should still reject ask_user in non-interactive YOLO mode', async () => {
+      const mockPolicyEngine = {
+        check: vi.fn().mockResolvedValue({ decision: PolicyDecision.ASK_USER }),
+      } as unknown as Mocked<PolicyEngine>;
+
+      const mockConfig = {
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.YOLO),
+        getPolicyEngine: vi.fn().mockReturnValue(mockPolicyEngine),
+        isInteractive: vi.fn().mockReturnValue(false),
+      } as unknown as Mocked<Config>;
+
+      const toolCall = {
+        request: { name: 'ask_user', args: {} },
+        tool: { name: 'ask_user', displayName: 'Ask User' },
+      } as ValidatingToolCall;
+
+      await expect(checkPolicy(toolCall, mockConfig)).rejects.toThrow(
+        /not supported in non-interactive mode/,
+      );
+    });
+
     it('should return DENY without throwing', async () => {
       const mockPolicyEngine = {
         check: vi.fn().mockResolvedValue({ decision: PolicyDecision.DENY }),
