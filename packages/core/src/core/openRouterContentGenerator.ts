@@ -387,7 +387,7 @@ function extractSystemInstruction(
   return undefined;
 }
 
-function convertToOpenAIFormat(
+export function convertToOpenAIFormat(
   request: GenerateContentParameters,
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const contents = normalizeContents(request.contents);
@@ -437,7 +437,14 @@ function convertToOpenAIFormat(
         (part: Part) => part && 'functionResponse' in part,
       );
 
-      if (functionResponses.length > 0 && role === 'function') {
+      // gemini-cli packs tool results as their own turn with role 'user'
+      // (Gemini's native convention), not role 'function'. Gating on
+      // role === 'function' here dropped native-tool results (read_file etc.)
+      // over OpenRouter: the parts carried no `text`, so they fell through to
+      // the text branch and emitted an empty message — the model never saw the
+      // tool output and hallucinated file contents. Fire on functionResponse
+      // presence regardless of role so the result reaches the model.
+      if (functionResponses.length > 0) {
         return functionResponses.map((part: Part, index: number) => ({
           role: 'tool' as const,
           // Prefer functionResponse.id to match the original tool_call.id
