@@ -331,6 +331,9 @@ export async function runNonInteractive(
                 role: 'assistant',
                 content: output,
                 delta: true,
+                // event.traceId carries the provider response id (OpenRouter
+                // `gen-...`); thread it into the transcript for cost lookup.
+                ...(event.traceId ? { response_id: event.traceId } : {}),
               });
             } else if (config.getOutputFormat() === OutputFormat.JSON) {
               responseText += output;

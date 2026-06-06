@@ -46,6 +46,14 @@ interface OpenRouterUsage {
   completion_tokens?: number;
   prompt_tokens?: number;
   total_tokens?: number;
+  // OpenRouter passes the upstream provider's cache accounting through here.
+  // For Gemini models this carries Google's implicit-cache read count
+  // (`cached_tokens`) and, when available, the cache-write count. The base
+  // OpenAI SDK type omits these, so we declare them for the cast below.
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+  };
 }
 
 const DEFAULT_OPENROUTER_COMPRESSION_MODEL = 'google/gemini-3-flash-preview';
@@ -128,6 +136,12 @@ export function createOpenRouterContentGenerator(
       const pending = new Map<number, PendingCall>();
       let finalUsage: OpenAI.Completions.CompletionUsage | undefined;
       let finalFinishReason: string | null | undefined;
+      // OpenRouter stamps every chunk with the generation id (`gen-...`).
+      // Capture it so it can be surfaced on the Gemini responses below as
+      // `responseId`; gemini-cli threads that into the stream-json transcript
+      // (as the message `response_id`), letting us reconcile each turn against
+      // OpenRouter's generation/cost API after the run.
+      let responseId: string | undefined;
 
       for await (const chunk of stream) {
         const choice = chunk.choices?.[0];
@@ -148,6 +162,7 @@ export function createOpenRouterContentGenerator(
           fb.blockReason = BlockedReason.BLOCKED_REASON_UNSPECIFIED;
           fb.safetyRatings = [];
           resp.promptFeedback = fb;
+          if (chunk.id) resp.responseId = chunk.id;
           yield resp;
         }
 
@@ -167,6 +182,7 @@ export function createOpenRouterContentGenerator(
 
         if (choice?.finish_reason) finalFinishReason = choice.finish_reason;
         if (chunk.usage) finalUsage = chunk.usage;
+        if (chunk.id) responseId = chunk.id;
       }
 
       // Stream ended. If we accumulated tool calls, emit them now as one
@@ -227,9 +243,11 @@ export function createOpenRouterContentGenerator(
             um.promptTokenCount = u.prompt_tokens || 0;
             um.candidatesTokenCount = u.completion_tokens || 0;
             um.totalTokenCount = u.total_tokens || 0;
-            um.cachedContentTokenCount = 0;
+            um.cachedContentTokenCount =
+              u.prompt_tokens_details?.cached_tokens || 0;
             resp.usageMetadata = um;
           }
+          if (responseId) resp.responseId = responseId;
           yield resp;
           return;
         }
@@ -249,8 +267,10 @@ export function createOpenRouterContentGenerator(
         um.promptTokenCount = u.prompt_tokens || 0;
         um.candidatesTokenCount = u.completion_tokens || 0;
         um.totalTokenCount = u.total_tokens || 0;
-        um.cachedContentTokenCount = 0;
+        um.cachedContentTokenCount =
+          u.prompt_tokens_details?.cached_tokens || 0;
         resp.usageMetadata = um;
+        if (responseId) resp.responseId = responseId;
         yield resp;
       }
     } catch (error) {
@@ -560,12 +580,15 @@ function convertToGeminiResponse(
   usageMetadata.promptTokenCount = usage?.prompt_tokens || 0;
   usageMetadata.candidatesTokenCount = usage?.completion_tokens || 0;
   usageMetadata.totalTokenCount = usage?.total_tokens || 0;
-  usageMetadata.cachedContentTokenCount = 0;
+  usageMetadata.cachedContentTokenCount =
+    usage?.prompt_tokens_details?.cached_tokens || 0;
 
   const response = new GenerateContentResponse();
   response.candidates = candidates;
   response.promptFeedback = promptFeedback;
   response.usageMetadata = usageMetadata;
+  // Surface the OpenRouter generation id for transcript reconciliation.
+  if (completion.id) response.responseId = completion.id;
 
   return response;
 }

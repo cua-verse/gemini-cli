@@ -51,6 +51,11 @@ export interface MessageEvent extends BaseJsonStreamEvent {
   role: 'user' | 'assistant';
   content: string;
   delta?: boolean;
+  // Provider response id for this assistant turn. Over OpenRouter this is the
+  // `gen-...` generation id, usable to look up cost/usage via OpenRouter's
+  // generation API. Absent for user messages and for providers that don't
+  // surface a response id.
+  response_id?: string;
 }
 
 export interface ToolUseEvent extends BaseJsonStreamEvent {
