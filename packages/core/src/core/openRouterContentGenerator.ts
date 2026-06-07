@@ -465,23 +465,86 @@ export function convertToOpenAIFormat(
       // tool output and hallucinated file contents. Fire on functionResponse
       // presence regardless of role so the result reaches the model.
       if (functionResponses.length > 0) {
-        return functionResponses.map((part: Part, index: number) => ({
-          role: 'tool' as const,
-          // Prefer functionResponse.id to match the original tool_call.id
-          // emitted on the assistant turn (OpenAI requires strict matching).
-          // Fall back to name only when id is missing (older gemini-cli paths).
-          tool_call_id:
-            part.functionResponse?.id ||
-            part.functionResponse?.name ||
-            `call_${index}`,
-          content: JSON.stringify(part.functionResponse?.response || {}),
+        const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
+
+        // Collect image parts that ride along with tool results. MCP tools
+        // (e.g. the CUA `screenshot` tool) return their image as an
+        // `inlineData` Part. Depending on `supportsMultimodalFunctionResponse`
+        // it is either nested under `functionResponse.parts` or emitted as a
+        // sibling Part in this same content turn. Either way it must reach the
+        // model — OpenAI `role:"tool"` messages can only carry a string, so we
+        // re-emit the images as a following `role:"user"` message with
+        // `image_url` content. Without this, the model is blind to every
+        // screenshot over OpenRouter and hallucinates GUI contents.
+        const imageParts: Part[] = [];
+
+        functionResponses.forEach((part: Part, index: number) => {
+          messages.push({
+            role: 'tool' as const,
+            // Prefer functionResponse.id to match the original tool_call.id
+            // emitted on the assistant turn (OpenAI requires strict matching).
+            // Fall back to name only when id is missing (older gemini-cli paths).
+            tool_call_id:
+              part.functionResponse?.id ||
+              part.functionResponse?.name ||
+              `call_${index}`,
+            content: JSON.stringify(part.functionResponse?.response || {}),
+          });
+          // Nested multimodal-function-response case.
+          const nested = (
+            part.functionResponse as unknown as { parts?: Part[] }
+          )?.parts;
+          if (Array.isArray(nested)) {
+            for (const p of nested) {
+              if (p?.inlineData?.data) imageParts.push(p);
+            }
+          }
+        });
+
+        // Sibling case: inlineData Parts in the same content turn.
+        for (const p of parts) {
+          if (p?.inlineData?.data) imageParts.push(p);
+        }
+
+        const imageContent = imageParts.map((p: Part) => ({
+          type: 'image_url' as const,
+          image_url: {
+            url: `data:${p.inlineData?.mimeType || 'image/png'};base64,${
+              p.inlineData?.data
+            }`,
+          },
         }));
+        if (imageContent.length > 0) {
+          messages.push({ role: 'user', content: imageContent });
+        }
+
+        return messages;
       }
 
       const textParts = parts.filter((part: Part) => part && 'text' in part);
       const text = textParts
         .map((part: Part) => ('text' in part ? part.text || '' : ''))
         .join('\n');
+
+      // Forward inline images on plain user turns too (e.g. a user-supplied
+      // screenshot). OpenAI only accepts image content on user messages, so
+      // assistant turns keep their text-only form.
+      const imageParts = parts.filter((part: Part) => part?.inlineData?.data);
+      if (role === 'user' && imageParts.length > 0) {
+        const content: OpenAI.Chat.ChatCompletionContentPart[] = [];
+        if (text) content.push({ type: 'text', text });
+        for (const p of imageParts) {
+          content.push({
+            type: 'image_url',
+            image_url: {
+              url: `data:${p.inlineData?.mimeType || 'image/png'};base64,${
+                p.inlineData?.data
+              }`,
+            },
+          });
+        }
+        return { role: 'user' as const, content };
+      }
 
       return {
         role: role === 'user' ? 'user' : 'assistant',

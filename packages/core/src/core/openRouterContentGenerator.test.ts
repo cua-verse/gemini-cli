@@ -105,4 +105,102 @@ describe('convertToOpenAIFormat — tool-result forwarding', () => {
     expect(toolMsg?.tool_call_id).toBe('call_2');
     expect(String(toolMsg?.content)).toContain('alpha');
   });
+
+  // MCP tools (e.g. the CUA `screenshot` tool) return an image as an
+  // `inlineData` Part. OpenAI role:'tool' messages can only carry a string, so
+  // the converter must re-emit the image as a following role:'user' message
+  // with `image_url` content. Without this the model is blind to every
+  // screenshot over OpenRouter and hallucinates GUI contents.
+  const expectImageUrl = (msg: unknown, data: string) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parts = (msg as any).content as any[];
+    expect(Array.isArray(parts)).toBe(true);
+    const img = parts.find((p) => p.type === 'image_url');
+    expect(img).toBeDefined();
+    expect(img.image_url.url).toContain('data:image/png;base64,');
+    expect(img.image_url.url).toContain(data);
+  };
+
+  it('forwards a sibling inlineData image alongside a tool result', () => {
+    // supportsMultimodalFunctionResponse is false for gemini-3.5-flash, so the
+    // screenshot image lands as a sibling Part next to the functionResponse.
+    const msgs = convertToOpenAIFormat({
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_1',
+                name: 'screenshot',
+                response: { output: 'Screenshot captured' },
+              },
+            },
+            { inlineData: { mimeType: 'image/png', data: 'AAAASIBLING' } },
+          ],
+        },
+      ],
+    } as never);
+
+    const toolMsg = msgs.find((m) => m.role === 'tool');
+    expect(toolMsg?.tool_call_id).toBe('call_1');
+    const userMsg = msgs.find(
+      (m) => m.role === 'user' && Array.isArray(m.content),
+    );
+    expectImageUrl(userMsg, 'AAAASIBLING');
+  });
+
+  it('forwards a nested multimodal-functionResponse image', () => {
+    const msgs = convertToOpenAIFormat({
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_2',
+                name: 'screenshot',
+                response: { output: 'Screenshot captured' },
+                // nested by convertToFunctionResponse when the model supports it
+                parts: [
+                  { inlineData: { mimeType: 'image/png', data: 'AAAANESTED' } },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    } as never);
+
+    const toolMsg = msgs.find((m) => m.role === 'tool');
+    expect(toolMsg?.tool_call_id).toBe('call_2');
+    const userMsg = msgs.find(
+      (m) => m.role === 'user' && Array.isArray(m.content),
+    );
+    expectImageUrl(userMsg, 'AAAANESTED');
+  });
+
+  it('forwards an inline image on a plain user turn', () => {
+    const msgs = convertToOpenAIFormat({
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: 'look at this' },
+            { inlineData: { mimeType: 'image/png', data: 'AAAAUSER' } },
+          ],
+        },
+      ],
+    } as never);
+
+    const userMsg = msgs.find(
+      (m) => m.role === 'user' && Array.isArray(m.content),
+    );
+    expectImageUrl(userMsg, 'AAAAUSER');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parts = (userMsg as any).content as any[];
+    expect(
+      parts.some((p) => p.type === 'text' && p.text === 'look at this'),
+    ).toBe(true);
+  });
 });
