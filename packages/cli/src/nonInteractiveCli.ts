@@ -414,6 +414,38 @@ export async function runNonInteractive(
             const requestInfo = completedToolCall.request;
 
             if (streamFormatter) {
+              // Surface inline media (e.g. the CUA `screenshot` PNG) the tool
+              // returned to the model. It lives in responseParts as inlineData
+              // — either a top-level sibling Part or nested under a multimodal
+              // functionResponse's `.parts`. `resultDisplay` is only the
+              // `[Image: ...]` placeholder, so without this the transcript
+              // carries no bytes and screenshot persistence has nothing to take.
+              const media: Array<{
+                mime_type: string;
+                data?: string;
+                uri?: string;
+              }> = [];
+              const collectMedia = (parts?: Part[]): void => {
+                for (const p of parts ?? []) {
+                  if (p.inlineData?.data) {
+                    media.push({
+                      mime_type: p.inlineData.mimeType ?? 'image/png',
+                      data: p.inlineData.data,
+                    });
+                  } else if (p.fileData?.fileUri) {
+                    media.push({
+                      mime_type:
+                        p.fileData.mimeType ?? 'application/octet-stream',
+                      uri: p.fileData.fileUri,
+                    });
+                  } else if (p.functionResponse) {
+                    collectMedia(
+                      (p.functionResponse as { parts?: Part[] }).parts,
+                    );
+                  }
+                }
+              };
+              collectMedia(toolResponse.responseParts);
               streamFormatter.emitEvent({
                 type: JsonStreamEventType.TOOL_RESULT,
                 timestamp: new Date().toISOString(),
@@ -424,6 +456,7 @@ export async function runNonInteractive(
                   typeof toolResponse.resultDisplay === 'string'
                     ? toolResponse.resultDisplay
                     : undefined,
+                media: media.length > 0 ? media : undefined,
                 error: toolResponse.error
                   ? {
                       type: toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
