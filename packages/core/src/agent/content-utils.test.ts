@@ -90,6 +90,22 @@ describe('geminiPartsToContentParts', () => {
     expect(result).toEqual([]);
   });
 
+  it('harvests media nested in a multimodal functionResponse', () => {
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          name: 'screenshot',
+          response: { output: '[Image: image/png]' },
+          // multimodal functionResponse nests media under `.parts`
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'B64' } }],
+        },
+      } as Part,
+    ];
+    expect(geminiPartsToContentParts(parts)).toEqual([
+      { type: 'media', data: 'B64', mimeType: 'image/png' },
+    ]);
+  });
+
   it('serializes unknown part types to text with _meta', () => {
     const parts: Part[] = [{ unknownField: 'data' } as Part];
     const result = geminiPartsToContentParts(parts);

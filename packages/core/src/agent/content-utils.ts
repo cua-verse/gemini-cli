@@ -42,7 +42,31 @@ export function geminiPartsToContentParts(parts: Part[]): ContentPart[] {
     } else if ('functionCall' in part && part.functionCall) {
       continue; // Skip function calls, they are emitted as distinct tool_request events
     } else if ('functionResponse' in part && part.functionResponse) {
-      continue; // Skip function responses, they are tied to tool_response events
+      // The functionResponse envelope is tied to tool_response events and not
+      // surfaced as content — BUT a multimodal functionResponse nests its media
+      // (e.g. a CUA screenshot) under `.parts` (see convertToFunctionResponse,
+      // the `supportsMultimodalFunctionResponse` branch). Harvest that media so
+      // it isn't silently dropped; otherwise screenshots never reach the
+      // tool_response content and downstream persistence has nothing to extract.
+      const nested = (part.functionResponse as { parts?: Part[] }).parts;
+      if (Array.isArray(nested)) {
+        for (const np of nested) {
+          if (np?.inlineData) {
+            result.push({
+              type: 'media',
+              data: np.inlineData.data,
+              mimeType: np.inlineData.mimeType,
+            });
+          } else if (np?.fileData) {
+            result.push({
+              type: 'media',
+              uri: np.fileData.fileUri,
+              mimeType: np.fileData.mimeType,
+            });
+          }
+        }
+      }
+      continue;
     } else {
       // Fallback: serialize any unrecognized part type to text
       result.push({
