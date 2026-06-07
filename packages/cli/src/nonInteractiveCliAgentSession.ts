@@ -472,12 +472,34 @@ export async function runNonInteractive({
             if (streamFormatter) {
               const displayText = getTextContent(event.displayContent);
               const errorMsg = getTextContent(event.content) ?? 'Tool error';
+              // Inline media the tool sent to the model (e.g. the CUA
+              // `screenshot` PNG) lives in event.content as `media` parts;
+              // displayText is only the `[Image: ...]` placeholder. Surface the
+              // bytes on the stream event so the transcript carries them and
+              // downstream screenshot persistence can extract them.
+              const media: Array<{
+                mime_type: string;
+                data?: string;
+                uri?: string;
+              }> = [];
+              for (const part of event.content ?? []) {
+                // Discriminated-union narrowing on `type` exposes the media
+                // fields without unsafe casts.
+                if (part.type !== 'media') continue;
+                if (!part.data && !part.uri) continue;
+                media.push({
+                  mime_type: part.mimeType ?? 'application/octet-stream',
+                  data: part.data,
+                  uri: part.uri,
+                });
+              }
               streamFormatter.emitEvent({
                 type: JsonStreamEventType.TOOL_RESULT,
                 timestamp: new Date().toISOString(),
                 tool_id: event.requestId,
                 status: event.isError ? 'error' : 'success',
                 output: displayText,
+                media: media.length > 0 ? media : undefined,
                 error: event.isError
                   ? {
                       type:

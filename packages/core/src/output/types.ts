@@ -70,6 +70,18 @@ export interface ToolResultEvent extends BaseJsonStreamEvent {
   tool_id: string;
   status: 'success' | 'error';
   output?: string;
+  /**
+   * Inline media (image/pdf/...) the tool returned to the model, e.g. the CUA
+   * `screenshot` tool's PNG. `output` carries only the text placeholder
+   * (`[Image: image/png]`), so without this the raw bytes never reach the
+   * transcript and downstream screenshot persistence has nothing to extract.
+   * Each entry mirrors a genai `media` Part: base64 `data` (inline) or `uri`.
+   */
+  media?: Array<{
+    mime_type: string;
+    data?: string;
+    uri?: string;
+  }>;
   error?: {
     type: string;
     message: string;
